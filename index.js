@@ -1,18 +1,14 @@
-const INT_DIGITS = 2;
-const BIGINT_DIGITS = BigInt(INT_DIGITS);
-const MAX_INT = 10n ** BIGINT_DIGITS - 1n;
-const MAX_INT_BASE = 10n ** (BIGINT_DIGITS - 1n);
-
 /**
- * @param {string | bigint | number | {dp: number, sign: 1 | -1, v: Array}} val
- * @return {Dec}
+ * @param {string | bigint | number | {dp: number, v: BigInt}} val
+ * @return {BigDec}
  * @constructor
  */
-function Dec(val) {
-    if (val instanceof Dec) return val;
-    if (!this || this.constructor !== Dec) return new Dec(val);
+function BigDec(val) {
+    if (val instanceof BigDec) return val;
+    if (!this || this.constructor !== BigDec) return new BigDec(val);
     if (typeof val === "number" || typeof val === "bigint") val = val.toString();
     if (typeof val === "string") {
+        val = val.replaceAll(" ", "");
         if (!val || val === "0") return ZERO;
         if (val[0] === "+") val = val.substring(1);
         if (!/^-?\d*(\.\d*)?$/.test(val)) throw new Error("Invalid number notation: '" + val + "'");
@@ -25,37 +21,178 @@ function Dec(val) {
 
         val = val.substring(0, decimalPoint) + val.substring(decimalPoint + 1);
 
-        const vLen = Math.ceil(val.length / INT_DIGITS);
-        const v = [];
-
-        for (let i = val.length - INT_DIGITS, j = vLen - 1; i > -INT_DIGITS; i -= INT_DIGITS, j--) {
-            v[j] = BigInt(val.substring(i, i + INT_DIGITS));
-        }
-
-        if (v.length > 1 && !v[0]) v.shift();
-
         this.dp = val.length - decimalPoint;
-        this.sign = sign;
-        this.v = v;
+        /*** @type {bigint} */
+        this.v = BigInt(sign * val);
     } else {
         Object.assign(this, val);
-        this._collectGarbage();
+    }
+    if (this.dp > BigDec.FLOAT_PRECISION) {
+        const diff = this.dp - BigDec.FLOAT_PRECISION;
+        this.v = BigInt(this.v.toString().slice(0, -diff));
+        this.dp = BigDec.FLOAT_PRECISION;
     }
 }
 
-Dec.prototype.isZero = function () {
-    for (let i = 0; i < this.v.length; i++) {
-        if (this.v[i] > 0) return false;
+BigDec.FLOAT_PRECISION = 20;
+const ZERO = new BigDec({dp: 0, v: 0n});
+
+BigDec.prototype._simplifyPrecision = function () {
+    while (this.dp > 0 && this.v % 10n === 0n) {
+        this.dp--;
+        this.v /= 10n;
     }
-    return true;
+    return this;
 };
 
-Dec.prototype.toString = function () {
-    if (this.isZero()) return "0";
-    let str = "";
-    for (let i = 0; i < this.v.length; i++) {
-        str += this.v[i].toString().padStart(INT_DIGITS, "0");
+BigDec.prototype.isZero = function () {
+    return this.v === 0n;
+};
+
+BigDec.prototype.clone = function () {
+    return BigDec({dp: this.dp, v: this.v});
+};
+
+BigDec.prototype.negate = function () {
+    return new BigDec({dp: this.dp, v: -this.v});
+};
+
+BigDec.prototype.digitCount = function () {
+    return this.v.toString().length;
+};
+
+BigDec.prototype.posDigitCount = function () {
+    return this.digitCount() - this.dp;
+};
+
+BigDec.prototype.eq = function (dec) {
+    dec = BigDec(dec);
+    return this.v === dec.v
+        && this.dp === dec.dp;
+};
+
+BigDec.prototype.sign = function () {
+    return this.v > 0n ? 1 : (this.v === 0n ? 0 : -1);
+};
+
+// 2  <=> invalid.
+// 1  <=> this > dec
+// 0  <=> this = dec
+// -1 <=> this < dec
+BigDec.prototype.cmp = function (dec) {
+    dec = BigDec(dec);
+
+    if (this.eq(dec)) return 0;
+
+    const signT = this.sign();
+    const signD = dec.sign();
+    if (signT !== signD) return signT > signD ? 1 : -1;
+
+    const thD = this.posDigitCount();
+    const deD = dec.posDigitCount();
+    if (thD !== deD) return thD > deD ? 1 : -1;
+
+    return this.v > dec.v ? 1 : -1;
+};
+
+BigDec.prototype.gt = function (dec) {
+    return this.cmp(dec) === 1;
+};
+
+BigDec.prototype.lt = function (dec) {
+    return this.cmp(dec) === -1;
+};
+
+BigDec.prototype.shiftLeft = function (amount = 1) {
+    return new BigDec({dp: this.dp + amount, v: BigInt(this.v.toString() + "0".repeat(amount))});
+};
+
+BigDec.prototype.abs = function () {
+    return new BigDec({dp: this.dp, sign: 1, v: this.v})
+};
+
+BigDec.prototype.add = function (b) {
+    let a = this;
+    b = BigDec(b);
+
+    if (a.dp !== b.dp) {
+        const len = Math.abs(a.dp - b.dp);
+        if (a.dp > b.dp) b = b.shiftLeft(len);
+        if (b.dp > a.dp) a = a.shiftLeft(len);
     }
+
+    return new BigDec({dp: a.dp, v: a.v + b.v});
+};
+
+BigDec.prototype.sub = function (dec) {
+    dec = BigDec(dec);
+    return this.add(dec.negate());
+};
+
+BigDec.prototype.mul = function (dec) {
+    dec = BigDec(dec);
+    return new BigDec({dp: this.dp + dec.dp, v: this.v * dec.v});
+};
+
+BigDec.prototype.inverse = function () {
+    if (this.isZero()) throw new Error("Can't divide by zero.");
+    let vStr = this.v.toString();
+    if (/^-?10*$/.test(vStr)) {
+        vStr = vStr.replace("-", "");
+        const dp = vStr.length - 1 - this.dp; // -1 is for the extra "1" at the beginning of the number
+        if (dp > 0) return new BigDec({dp, v: 1n});
+        return new BigDec({dp: 0, v: BigInt((this.v > 0n ? "" : "-") + "1" + "0".repeat(-dp))});
+    }
+    let result = "";
+    const count = this.digitCount();
+    let n = BigInt("1" + "0".repeat(count));
+    const vUse = this.v > 0n ? this.v : -this.v;
+    for (let i = 0; i < BigDec.FLOAT_PRECISION; i++) {
+        const mod = n % vUse;
+        result += n / vUse;
+        if (mod === 0n) break;
+        n = mod * 10n;
+    }
+    return new BigDec({dp: count + result.length - 1 - this.dp, v: BigInt((this.v > 0n ? "" : "-") + result)});
+};
+
+/**
+ * @param dec
+ * @return {BigDec}
+ */
+BigDec.prototype.div = function (dec) {
+    dec = BigDec(dec);
+    return this.mul(dec.inverse())._simplifyPrecision();
+};
+
+BigDec.prototype.square = function () {
+    return this.mul(this);
+};
+
+BigDec.prototype.cube = function () {
+    return this.mul(this.mul(this));
+};
+
+BigDec.prototype.sqrt = function () {
+    if (this.v < 0) throw new Error("Can't take the square root of a negative number in the real world.");
+    if (this.v === 0n || this.v === 1n) return this;
+    let x = this.div(2);
+    for (let i = 0; i < 100000; i++) {
+        const a = this.div(x);
+        const b = x.add(a);
+        const c = b.div(2);
+        const dx = c.sub(x);
+        if (dx.isZero()) return x;
+        x = c;
+    }
+    console.warn("not enough precision");
+    return x;
+};
+
+BigDec.prototype.toString = function () {
+    if (this.isZero()) return "0";
+    let str = this.v.toString();
+    if (str[0] === "-") str = str.substring(1);
     if (str.length < this.dp) {
         str = "0".repeat(this.dp - str.length) + str;
     }
@@ -66,176 +203,90 @@ Dec.prototype.toString = function () {
     }
     while (str.startsWith("0")) str = str.substring(1);
     if (str.startsWith(".")) str = "0" + str;
-    const sign = this.sign === 1 ? "" : "-";
+    const sign = this.v >= 0 ? "" : "-";
     return sign + str;
 };
 
-Dec.prototype.clone = function () {
-    return Dec({dp: this.dp, sign: this.sign, v: Array.from(this.v)});
-};
-
-Dec.prototype.negate = function () {
-    const x = this.clone();
-    x.sign *= -1;
-    return x;
-};
-
-Dec.prototype.digitCount = function () {
-    return this.v.reduce((a, b) => a + b.toString().length, 0);
-};
-
-Dec.prototype.posDigitCount = function () {
-    return this.digitCount() - this.dp;
-};
-
-Dec.prototype.eq = function (dec) {
-    dec = Dec(dec);
-    return dec.v.length === this.v.length
-        && dec.dp === this.dp
-        && dec.v.every((v, k) => v === this.v[k]);
-};
-
-// 1  <=> this > dec
-// 0  <=> this = dec
-// -1 <=> this < dec
-Dec.prototype.cmp = function (dec) {
-    dec = Dec(dec);
-    if (this.eq(dec)) return dec;
-    const thD = this.posDigitCount();
-    const deD = dec.posDigitCount();
-    if (thD !== deD) {
-        return thD > deD ? 1 : -1;
-    }
+BigDec.prototype.toFixed = function (dp) {
     // todo
 };
 
-Dec.prototype.gt = function (dec) {
-    return this.cmp(dec) === 1;
-};
-
-Dec.prototype.lt = function (dec) {
-    return this.cmp(dec) === -1;
-};
-
-Dec.prototype._collectGarbage = function () {
-    for (; ;) {
-        if (this.v.length === 1) break;
-        const t = this.v[0];
-        if (t && t > 0n) break;
-        this.v.shift();
-    }
-};
-
-Dec.prototype._shiftLeft = function () {
-    // [43, 123, 456]  = 3123456
-    // [431, 234, 560] = 31234560
-    const more = this.v[0] >= MAX_INT_BASE;
-    const vl = this.v.length;
-    const v = [];
-    v[vl - 1] = BigInt(this.v[vl - 1].toString().substring(1) + "0");
-    const mx = more ? 0 : 1;
-    for (let i = vl - 1 - 1; i >= mx; i--) {
-        v[i] = BigInt(this.v[i].toString().substring(1) + this.v[i + 1].toString()[0]);
-    }
-    if (more) {
-        v.unshift(BigInt(this.v[0].toString()[0]));
-    } else v[0] = BigInt(this.v[0].toString() + (this.v[1] || "0").toString()[0]);
-    this.v = v;
-};
-
-Dec._overflowDigit = function (v, i) {
-    const n = v[i];
-    if (n > MAX_INT) {
-        if (i === 0) v.unshift(1n);
-        else {
-            v[i - 1] += 1n;
-            this._overflowDigit(v, i - 1);
-        }
-        v[i] -= MAX_INT + 1n;
-        this._overflowDigit(v, i);
-    } else if (n < 0) {
-        // [1, -1, 9]
-        if (i === 0) {
-            v[i] *= -1n;
-            return -1n;
-        } else {
-            v[i - 1] -= 1n;
-            v[i] += MAX_INT + 1n < 0n;
-            this._overflowDigit(v, i - 1);
-            this._overflowDigit(v, i);
-        }
-    }
-    return 1n;
-};
-
-Dec.prototype.add = function (b) {
-    let a = this;
-    b = Dec(b);
-
-    const opSign = BigInt(a.sign * b.sign);
-
-    if (opSign === -1n) {
-        // todo: check which one is larger with .gt() for subtraction
-    }
-
-    if (b.dp > a.dp) {
-        const t = a;
-        a = b;
-        b = t;
-    }
-
-    if (a.dp > b.dp) {
-        // adds zeroes at the end to make the size fixed
-        // a = 124124.124198
-        // b = 124142.210000
-        b = b.clone();
-        for (let i = 0; i < a.dp - b.dp; i++) b._shiftLeft();
-    }
-
-    const vLen = Math.max(a.v.length, b.v.length) + 1;
-    const v = new Array(vLen).fill(0n);
-
-    for (let i = 0; i < vLen - 1; i++) {
-        v[vLen - i] = (a.v[a.v.length - i - 1] ?? 0n) + opSign * (b.v[b.v.length - i - 1] ?? 0n);
-        Dec._overflowDigit(v, i + 1);
-    }
-
-    return Dec({dp: a.dp, sign: a.sign, v});
-};
-
 /**
- * @param {string | bigint | number | {dp: number, sign: 1 | -1, v: Array} | Dec} re
- * @param {string | bigint | number | {dp: number, sign: 1 | -1, v: Array} | Dec} im
+ * @param {string | bigint | number | {dp: number, v: BigInt} | BigDec} re
+ * @param {string | bigint | number | {dp: number, v: BigInt} | BigDec} im
  * @constructor
  */
-function Num(re = "0", im = "0") {
-    if (re instanceof Num) return re;
-    if (!this || this.constructor !== Num) return new Num(re, im);
+function BigNum(re = "0", im = "0") {
+    if (re instanceof BigNum) return re;
+    if (!this || this.constructor !== BigNum) return new BigNum(re, im);
 
-    this.re = Dec(re);
-    this.im = Dec(im);
+    if (typeof re === "string" && /^[+-]?\d*(\.\d*)?[+-](i\d*(\.\d*)?|\d*(\.\d*)?i|i)$/.test(re.replaceAll(" ", ""))) {
+        re = re.replaceAll(" ", "");
+        const spl = re.split(/([+-])/);
+        re = spl[0];
+        im = spl[1] + (spl[2].replace("i", "") || "1");
+    }
+
+    this.re = BigDec(re);
+    this.im = BigDec(im);
 }
 
-Num.prototype.clone = function () {
-    return new Num(this.re.clone(), this.im.clone());
-}
+BigNum.prototype.clone = function () {
+    return new BigNum(this.re.clone(), this.im.clone());
+};
 
-Num.prototype.negate = function () {
-    return new Num(this.re.negate(), this.im.negate());
-}
+BigNum.prototype.negate = function () {
+    return new BigNum(this.re.negate(), this.im.negate());
+};
 
-Num.prototype.add = function (num) {
-    num = Num(num);
-    return new Num(this.re.add(num.re), this.im.add(num.im));
-}
+BigNum.prototype.add = function (num) {
+    num = BigNum(num);
+    return new BigNum(this.re.add(num.re), this.im.add(num.im));
+};
 
 // noinspection JSValidateTypes,JSDeprecatedSymbols
-Num.prototype.sub = function (num) {
-    num = Num(num);
-    return new Num(this.re.add(num.re.negate()), this.im.add(num.im.negate()));
-}
+BigNum.prototype.sub = function (num) {
+    num = BigNum(num);
+    return new BigNum(this.re.sub(num.re), this.im.sub(num.im));
+};
 
-Num.prototype.toString = function () {
+BigNum.prototype.mul = function (num) {
+    num = BigNum(num);
+    // (a + bi) / (c + di) = (ac - bd) + i(ad + bc)
+    return new BigNum(
+        this.re.mul(num.re).sub(this.im.mul(num.im)),
+        this.re.mul(num.im).add(this.im.mul(num.re))
+    );
+};
+
+BigNum.prototype.inverse = function () {
+    // 1 / (a + bi) = (a - bi) / (a^2 + b^2)
+    const bottom = this.re.square().add(this.im.square());
+    return new BigNum(
+        this.re.div(bottom),
+        this.im.div(bottom).negate()
+    );
+};
+
+BigNum.prototype.div = function (num) {
+    num = BigNum(num);
+    return this.mul(num.inverse());
+};
+
+BigNum.prototype.isZero = function () {
+    return this.re.isZero() && this.im.isZero();
+};
+
+BigNum.prototype.sqrt = function () {
+};
+
+BigNum.prototype.abs = function () {
+    if (this.re.isZero()) return this;
+    if (this.im.isZero()) return new BigNum(this.im);
+    return this.re.square().add(this.im.square()).sqrt();
+};
+
+BigNum.prototype.toString = function () {
     const isReZero = this.re.isZero();
     const isImZero = this.im.isZero();
     if (isReZero && isImZero) return "0";
@@ -245,13 +296,7 @@ Num.prototype.toString = function () {
     }
     if (!isImZero) {
         let str = this.im.toString();
-        r += this.im.sign === 1 ? " + " + str + "i" : " - " + str.substring(1) + "i";
+        r += this.im.sign() === 1 ? " + " + str + "i" : " - " + str.substring(1) + "i";
     }
     return r;
-}
-
-const ZERO = Dec({dp: 0, sign: 1, v: [0]});
-
-console.log(
-    Dec(100).add(100000).toString()
-);
+};
